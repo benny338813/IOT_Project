@@ -1,0 +1,303 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <title>Mosquitto Websockets</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="mqttws31.js" type="text/javascript"></script>
+    <script src="jquery.min.js" type="text/javascript"></script>
+    <script src="config.js" type="text/javascript"></script>
+
+    <script type="text/javascript">
+    var mqtt;
+    var reconnectTimeout = 2000;
+	var AccidentRange = 200;
+	//var carGps = new Array(); 
+	var user = new Array();
+
+    function MQTTconnect() {
+	if (typeof path == "undefined") {
+		path = '/mqtt';
+	}
+	mqtt = new Paho.MQTT.Client(
+			host,
+			port,
+			path,
+			"web_" + parseInt(Math.random() * 100, 10)
+	);
+        var options = {
+            timeout: 3,
+            useSSL: useTLS,
+            cleanSession: cleansession,
+            onSuccess: onConnect,
+            onFailure: function (message) {
+                $('#status').val("Connection failed: " + message.errorMessage + "Retrying");
+                setTimeout(MQTTconnect, reconnectTimeout);
+            }
+        };
+
+        mqtt.onConnectionLost = onConnectionLost;
+        mqtt.onMessageArrived = onMessageArrived;
+
+        if (username != null) {
+            options.userName = username;
+            options.password = password;
+        }
+        console.log("Host="+ host + ", port=" + port + ", path=" + path + " TLS = " + useTLS + " username=" + username + " password=" + password);
+        mqtt.connect(options);
+    }
+
+    function onConnect() {
+        $('#status').val('Connected to ' + host + ':' + port + path);
+        // Connection succeeded; subscribe to our topic
+        mqtt.subscribe(topic + "/#", {qos: 0});
+        $('#topic').val(topic);
+		
+		//var reg = new Paho.MQTT.Message("FS:%s,Control:REG,Functional:monitor,Mapping:gps".replace('%s',topic)); // Register to IOT Server (for my iotServer)
+		var reg = new Paho.MQTT.Message('{"FunctionServer":"%s", "Control":"FS_REG","Function":"ControlCenter","FSIP":"92.8.23.1", "MappingNodes":"[Image, GPS]", "Source":"%s"}'.replace('%s',topic))
+		reg.destinationName = "IOTSV/REG";
+		mqtt.send(reg);
+    }
+
+    function onConnectionLost(response) {
+        setTimeout(MQTTconnect, reconnectTimeout);
+        $('#status').val("connection lost: " + responseObject.errorMessage + ". Reconnecting");
+
+    }
+
+    function onMessageArrived(message) {
+		document.getElementById("forTest").innerHTML = user.length;
+        var msgTopic = message.destinationName;
+        var payload = message.payloadString;
+        $('#ws').prepend('<li>' + msgTopic + ' = ' + payload + '</li>');
+		
+		obj = JSON.parse(payload);
+		//document.getElementById("forTest").innerHTML = obj.Control;
+		
+		switch (obj.Control){
+			case "LASTWILL":
+				for( i = 0; i<user.length; i++ ){
+						if(user[i].name == obj.Source)
+							user.splice(i,1); //remove user
+					}
+				if(user.length == 0){
+					document.getElementById("forTest").innerHTML = user.length;
+					imageObj.onload = function() {
+						context.drawImage(imageObj, 0, 0); // draw map
+					};
+					imageObj.src = 'map.jpg';
+				}
+				
+			break;
+			
+			case "REQ_CONNECT":
+				addNewUser(obj.Node);
+			break;
+				
+			case "UpdateValue":
+				if(typeof  obj.GPS != 'undefined'){
+					for( i = 0; i<user.length; i++ ){
+						if(user[i].name == obj.Source)
+							user[i].gps = obj.GPS;
+					}
+				}
+				if(typeof  obj.Temperature != 'undefined'){
+					for( i = 0; i<user.length; i++ ){
+						if(user[i].name == obj.Source)
+							user[i].temperature = obj.Temperature;
+					}
+				}
+				if(typeof  obj.Speed != 'undefined'){
+					for( i = 0; i<user.length; i++ ){
+						if(user[i].name == obj.Source)
+							user[i].Speed = obj.Speed;
+						if(obj.Speed > 80){ //超速
+							var msg = new Paho.MQTT.Message('{"FunctionServer":"%s", "Control":"OverSpeed", "Source":"%s"}'.replace('%s',topic))
+							msg.destinationName = obj.Source;
+							mqtt.send(msg);
+						}
+					}
+				}
+				if(typeof  obj.Accident != 'undefined'){
+					for( i = 0; i<user.length; i++ ){
+						if(user[i].name == obj.Source)
+							user[i].Accident = obj.Accident;
+					}
+				}
+				
+			break;
+					
+		}
+    }
+	
+	function addNewUser(name){
+	//document.getElementById("forTest").innerHTML = $.inArray(name, user);
+		var newName = name.split(","); 
+		for(j = 0; j < newName.length; j++){
+			for(i=0; i<user.length; i++){
+				if(user[i].name == newName[j]){
+					document.getElementById("forTest").innerHTML = "Already have";
+					break;
+				}
+			}
+			user.push({name:newName[j], GPS:''});
+			document.getElementById("forTest").innerHTML = newName[j];
+			//mqtt.subscribe(newName[j] + "/#", {qos: 0}); //for my IOTSERVER
+		}
+	}
+
+    $(document).ready(function() {
+        MQTTconnect();
+    });
+
+    </script>
+  </head>
+  
+  <body>
+  
+	<h1>Mosquitto Websockets</h1>
+	
+	<p id="forTest"></p>
+	<p id="forTest2"></p>
+  
+    <canvas id="myCanvas" width="1733" height="891" onclick="showCoords(event)"></canvas>
+    <script>
+      var canvas = document.getElementById('myCanvas');
+	  var context = canvas.getContext('2d');
+      var imageObj = new Image();
+	 /*
+	window.addEventListener("beforeunload", function (e) {
+		sendReconnectMSG();
+		(e || window.event).returnValue = null;
+		return null;
+	});
+
+	function sendReconnectMSG() {
+        for( i = 0; i<user.length; i++ ){
+            var msg = new Paho.MQTT.Message('{"FunctionServer":"%s", "Control":"LASTWILL", "Source":"%s"}'.replace('%s',topic));
+            msg.destinationName = "user[i].name";
+            mqtt.send(msg);
+        }
+	}
+     */
+	function showCoords(event) {
+		var x = event.clientX;
+		var y = event.clientY;
+		var coords = "X coords: " + x + ", Y coords: " + y;
+		//document.getElementById("forTest2").innerHTML = coords;
+		for(i=0; i<user.length; i++){
+			var temp = user[i].gps;
+			var lon = parseFloat(temp.split(",")[0]);
+			var lat = parseFloat(temp.split(",")[1]);
+			document.getElementById("forTest2").innerHTML = "X coords: " + Math.abs(x) + ", Y coords: " + Math.abs(-y+187); //187 調整用
+			if(Math.abs(mapX(lat)-x) < 50){
+				if(Math.abs(mapY(lon)-y+187) < 50){
+					document.getElementById("forTest2").innerHTML = "You click on user:" + user[i].name+",\tTemperature = "+user[i].temperature+",\Speed = "+user[i].Speed;
+					break;
+				}
+			}
+		}
+	}
+
+	  function sendMsg(msgTopic, msg){
+		var message = new Paho.MQTT.Message(msg);
+		message.destinationName = topic +"/"+ msgTopic;
+		mqtt.send(message);
+	  }
+	  
+	  function drawDot(x, y, i){
+		if(user[i].Careful == true)
+			context.fillStyle="#D75800"; 
+		else
+			context.fillStyle="#2BFF00";
+		context.beginPath();
+		context.arc(x,y,8,0,Math.PI*2,true);
+		context.closePath();
+		context.fill();
+	  }
+	  
+	  function drawCircle(x, y){
+		context.strokeStyle ="#FF0000";  
+		context.beginPath();
+		context.arc(x,y,AccidentRange,0,Math.PI*2,true);
+		context.closePath();
+		context.stroke();
+	  }
+	  
+	  function AccidentAlarm(x,y){
+		for(i=0; i<user.length; i++){
+			var temp = user[i].gps;
+			var lon = parseFloat(temp.split(",")[0]);
+			var lat = parseFloat(temp.split(",")[1]);
+			
+			var distance = Math.sqrt(Math.pow(mapX(lat)-x,2) +  Math.pow(mapY(lon)-y,2));
+			if(distance < AccidentRange){
+				var msg = new Paho.MQTT.Message('{"FunctionServer":"%s", "Control":"Carefully", "Source":"%s"}'.replace('%s',topic));
+				msg.destinationName = user[i].name;
+				mqtt.send(msg);
+				user[i].Careful = true; //以後再補完
+			}
+			else{
+				var msg = new Paho.MQTT.Message('{"FunctionServer":"%s", "Control":"Normal", "Source":"%s"}'.replace('%s',topic));
+				msg.destinationName = user[i].name;
+				mqtt.send(msg);
+				user[i].Careful = false;
+			}
+		}
+	  }
+	  
+	  //min 22.999871, 120.214835
+	  //中心 22.996128, 120.221701
+	  function mapX(Latitude){
+		return (Latitude-120.214835)*115569.4728;
+	  }
+	  
+	  function mapY(Longitude){
+		return (Longitude-22.999871)*(-125166.9784);
+	  }
+	  
+	  function renew(){
+		for(i=0; i<user.length; i++){
+			var temp = user[i].gps;
+			var lon = parseFloat(temp.split(",")[0]);
+			var lat = parseFloat(temp.split(",")[1]);
+			if(user[i].Accident == "SOS"){
+				drawCircle(mapX(lat),mapY(lon));
+				AccidentAlarm(mapX(lat),mapY(lon));
+			}
+			drawDot(mapX(lat), mapY(lon),i);
+		}
+	  }	  
+	  
+	  function drawMap(){
+	  // document.getElementById("forTest").innerHTML = carGps.length; // for test: show number of the datas that not execute yet
+		if(user.length > 0){
+			imageObj.onload = function() {
+				context.drawImage(imageObj, 0, 0); // draw map
+				renew();
+				//drawCar(120.221701,22.996128); // for test  
+			};
+			imageObj.src = 'map.jpg';
+		}
+	  }
+	  
+	 imageObj.onload = function() {
+		context.drawImage(imageObj, 0, 0); // draw map
+		renew();
+		//drawCar(120.221701,22.996128); // for test  
+	};
+	imageObj.src = 'map.jpg';
+	
+	setInterval(drawMap, 200);
+
+    </script>
+  
+    <div>
+        <div>Subscribed to <input type='text' id='topic' disabled />
+        Status: <input type='text' id='status' size="80" disabled /></div>
+
+        <ul id='ws' style="font-family: 'Courier New', Courier, monospace;"></ul>
+    </div>
+	
+  </body>
+</html>
